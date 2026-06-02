@@ -14,6 +14,8 @@ class RequestAction(str, Enum):
     COMMIT = "COMMIT"
     ROLLBACK = "ROLLBACK"
     PING = "PING"
+    REPLICATE = "REPLICATE"
+    PREPARE = "PREPARE"
 
 
 class ResponseStatus(str, Enum):
@@ -53,6 +55,14 @@ class MessageProtocol:
         ),
         RequestAction.PING: PayloadSchema(
             required={},
+            optional={},
+        ),
+        RequestAction.REPLICATE: PayloadSchema(
+            required={"log_entry": dict},
+            optional={},
+        ),
+        RequestAction.PREPARE: PayloadSchema(
+            required={"transaction_id": str, "quantity": int},
             optional={},
         ),
     }

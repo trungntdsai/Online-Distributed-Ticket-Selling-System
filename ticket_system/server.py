@@ -1,4 +1,4 @@
-"""Ticket server node (skeleton)."""
+"""Ticket server node with leader-follower replication and two-phase commit."""
 
 from __future__ import annotations
 
@@ -10,6 +10,24 @@ from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 from .inventory import InventoryManager
 from .protocol import MessageProtocol, RequestAction
+
+
+class ReplicationLog:
+    """Log of replicated operations (for two-phase commit)."""
+
+    def __init__(self) -> None:
+        self.entries: List[dict] = []
+        self._lock = threading.Lock()
+
+    def append(self, entry: dict) -> None:
+        """Append a log entry."""
+        with self._lock:
+            self.entries.append(entry)
+
+    def get_entries(self) -> List[dict]:
+        """Get a snapshot of all entries."""
+        with self._lock:
+            return list(self.entries)
 
 
 class ThreadPool:
@@ -74,7 +92,7 @@ class ThreadPool:
 
 
 class TicketServer:
-    """Server process that handles client requests and syncs with peers."""
+    """Server process that handles client requests, replication, and two-phase commit."""
 
     def __init__(
         self,
@@ -103,6 +121,9 @@ class TicketServer:
         self._accept_thread: Optional[threading.Thread] = None
         self._running = False
         self._client_timeout_seconds = 5.0
+        self._replication_log = ReplicationLog()
+        self._prepared_transactions: dict = {}
+        self._prepared_lock = threading.Lock()
 
     @property
     def server_address(self) -> Tuple[str, int]:
@@ -112,7 +133,7 @@ class TicketServer:
         return (bound_host, bound_port)
 
     def log(self, message: str) -> None:
-        """Emit verbose OS-level logs (placeholder)."""
+        """Emit verbose OS-level logs."""
         if self.logger:
             self.logger(message)
 
@@ -180,8 +201,24 @@ class TicketServer:
             self.log(f"[{self.server_id}] Connection closed for {client_address}.")
 
     def sync_with_peers(self) -> None:
-        """Sync state with peer nodes (placeholder)."""
-        raise NotImplementedError
+        """Sync state with peer nodes (placeholder for replication)."""
+        if not self.is_leader:
+            return
+        for peer_address in self.peers:
+            try:
+                entries = self._replication_log.get_entries()
+                if not entries:
+                    continue
+                with socket.create_connection(peer_address, timeout=1.0) as sock:
+                    for entry in entries:
+                        message = self.protocol.encode_request(
+                            RequestAction.REPLICATE,
+                            {"log_entry": entry},
+                        )
+                        sock.sendall(message.encode("utf-8") + b"\n")
+                        _ = sock.recv(4096)
+            except OSError:
+                pass
 
     def shutdown(self) -> None:
         """Shutdown listener and worker pool."""
@@ -233,10 +270,35 @@ class TicketServer:
                 request_id=request_id,
             )
 
+        if action == RequestAction.PREPARE:
+            transaction_id = payload["transaction_id"]
+            quantity = payload["quantity"]
+            reserved = self.inventory.reserve_ticket(transaction_id, quantity)
+            with self._prepared_lock:
+                self._prepared_transactions[transaction_id] = (quantity, reserved)
+            if not reserved:
+                return self.protocol.build_error_response(
+                    "INSUFFICIENT_TICKETS",
+                    "Not enough tickets available.",
+                    request_id=request_id,
+                )
+            return self.protocol.build_success_response(
+                {
+                    "transaction_id": transaction_id,
+                    "prepared": True,
+                },
+                request_id=request_id,
+            )
+
         if action == RequestAction.RESERVE:
             transaction_id = payload["transaction_id"]
             quantity = payload["quantity"]
             reserved = self.inventory.reserve_ticket(transaction_id, quantity)
+            self._replication_log.append({
+                "action": "RESERVE",
+                "transaction_id": transaction_id,
+                "quantity": quantity,
+            })
             if not reserved:
                 return self.protocol.build_error_response(
                     "INSUFFICIENT_TICKETS",
@@ -255,6 +317,12 @@ class TicketServer:
         if action == RequestAction.COMMIT:
             transaction_id = payload["transaction_id"]
             self.inventory.commit_purchase(transaction_id)
+            self._replication_log.append({
+                "action": "COMMIT",
+                "transaction_id": transaction_id,
+            })
+            with self._prepared_lock:
+                self._prepared_transactions.pop(transaction_id, None)
             return self.protocol.build_success_response(
                 {
                     "transaction_id": transaction_id,
@@ -266,8 +334,22 @@ class TicketServer:
         if action == RequestAction.ROLLBACK:
             transaction_id = payload["transaction_id"]
             self.inventory.rollback_purchase(transaction_id)
+            self._replication_log.append({
+                "action": "ROLLBACK",
+                "transaction_id": transaction_id,
+            })
+            with self._prepared_lock:
+                self._prepared_transactions.pop(transaction_id, None)
             return self.protocol.build_success_response(
                 {"transaction_id": transaction_id, "rolled_back": True},
+                request_id=request_id,
+            )
+
+        if action == RequestAction.REPLICATE:
+            log_entry = payload["log_entry"]
+            self._replication_log.append(log_entry)
+            return self.protocol.build_success_response(
+                {"replicated": True},
                 request_id=request_id,
             )
 
@@ -283,6 +365,11 @@ class TicketServer:
                 )
             try:
                 self.inventory.commit_purchase(transaction_id)
+                self._replication_log.append({
+                    "action": "BUY",
+                    "transaction_id": transaction_id,
+                    "quantity": quantity,
+                })
             except Exception as exc:
                 self.inventory.rollback_purchase(transaction_id)
                 return self.protocol.build_error_response(
@@ -304,3 +391,4 @@ class TicketServer:
             f"Unsupported action: {action.value}",
             request_id=request_id,
         )
+
