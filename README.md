@@ -5,26 +5,41 @@ This repository contains a Python skeleton that matches the required class struc
 ## Refined Architecture (High-Level)
 Clients send ticket requests to a LoadBalancer, which routes them to active TicketServer nodes. A leader node owns the source of truth for inventory and replicates state to follower nodes. Two-phase commit (prepare/commit/rollback) ensures ticket deductions only finalize after reservation/payment success. HealthChecker heartbeats detect failures and trigger rerouting to surviving servers.
 
+## OS Concepts Made Explicit
+| OS concept | Where it is exposed in this project |
+| --- | --- |
+| Process/Thread management | `TicketServer` uses an explicit `ThreadPool` to accept sockets and dispatch to worker threads. |
+| Synchronization (critical section) | `InventoryManager` uses a mutex with timeout-aware acquisition and explicit release hooks. |
+| Inter-Process Communication (IPC) | `MessageProtocol` defines how requests are marshaled/unmarshaled over raw sockets or RPC. |
+| Deadlock avoidance & recovery | Lock timeouts and rollback hooks live in `InventoryManager` and server transaction flow. |
+| Fault tolerance | `HealthChecker` heartbeats, leader/follower replication, and failover routing. |
+| Performance visibility | `BenchmarkRunner` captures throughput/latency vs. server count and thread count. |
+
 ## Project Structure
 ```
 ticket_system/
   protocol.py       # MessageProtocol (shared message format)
   inventory.py      # InventoryManager with locking (critical section)
-  server.py         # TicketServer (leader/follower, peer sync)
+  server.py         # TicketServer (leader/follower, peer sync, thread pool)
   coordinator.py    # LoadBalancer + HealthChecker
   client.py         # Client
   benchmark.py      # BenchmarkRunner
 ```
 
+## Make OS Mechanics Visible (Deliverables)
+1. Verbose console logs that show thread IDs, mutex acquisition/release, and rollback events.
+2. Architecture diagram labeling IPC links as TCP sockets and the inventory as a mutex-protected critical section.
+3. Benchmark graphs showing throughput vs. number of server threads (to highlight contention).
+
 ## Next Steps (Module Breakdown)
 | Module | Next step to complete |
 | --- | --- |
 | `protocol.py` | Finalize message schemas, error codes, and versioning; document required fields for BUY/RESERVE/COMMIT/ROLLBACK. |
-| `inventory.py` | Implement lock-protected reserve/commit/rollback, add timeouts, and release locks on failure to avoid deadlocks. |
-| `server.py` | Implement socket/RPC server, handle client requests, peer sync, leader-follower replication, and 2PC handlers. |
+| `inventory.py` | Implement lock-protected reserve/commit/rollback, add lock timeouts, and rollback logic for stalled transactions. |
+| `server.py` | Implement socket server, explicit thread-pool dispatch, peer sync, leader-follower replication, and 2PC handlers. |
 | `coordinator.py` | Implement round-robin routing, heartbeat loop, and server removal/addition on health changes. |
-| `client.py` | Implement connection logic and request flow (reserve -> commit/rollback). |
-| `benchmark.py` | Implement virtual clients, metrics collection (throughput/latency), plotting, and fault injection tests. |
+| `client.py` | Implement connection logic and request flow (reserve -> commit/rollback) with request IDs. |
+| `benchmark.py` | Implement virtual clients, metrics collection (throughput/latency), plotting, scalability and fault-injection tests. |
 
 ## Suggested Build Order
 1. Define protocol schemas and request/response types.
